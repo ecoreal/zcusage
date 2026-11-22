@@ -37,14 +37,16 @@ What you get beyond daily token tables:
 
 ## Install
 
-```bash
-# run directly (Node ≥ 24)
-npx zcusage status
+Requires Node ≥ 24 (uses the builtin `node:sqlite`).
 
-# or clone & run
+```bash
 git clone https://github.com/ecoreal/zcusage && cd zcusage
 npm install && npm run build
-node dist/cli.js daily
+node dist/cli.js status
+
+# optional: install globally
+npm link
+zcusage daily
 ```
 
 ## Commands
@@ -91,6 +93,7 @@ Works on Linux / macOS / Windows wherever Node ≥ 24 and a ZCode data directory
 
 ## Roadmap
 
+- [ ] npm publish (`npx zcusage` without cloning)
 - [ ] JSONL rollout fallback (`~/.zcode/cli/rollout/*.jsonl`) for machines without the SQLite store
 - [ ] `--project <dir>` filter and per-project rollups
 - [ ] HTML/TUI dashboard
