@@ -1,0 +1,40 @@
+{
+  "name": "zcusage",
+  "version": "0.1.0",
+  "description": "Usage, cost & performance analytics for ZCode agents — reads your local session SQLite, zero dependencies, nothing leaves your machine.",
+  "type": "module",
+  "engines": {
+    "node": ">=24.4.0"
+  },
+  "bin": {
+    "zcusage": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "zcode",
+    "ccusage",
+    "usage",
+    "tokens",
+    "cost",
+    "analytics",
+    "cli",
+    "ai-agent",
+    "sqlite"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "builtin-modules": "^5.4.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}
