@@ -1,5 +1,5 @@
 import type { UsageDatabase } from './types.js';
-import type { UsageRow, ModelRow, SessionRow, ToolRow, Totals } from './types.js';
+import type { UsageRow, ModelRow, SessionRow, ToolRow, Totals, ProjectRow } from './types.js';
 import { computeCost, type PricingTable } from './pricing.js';
 
 export interface QueryFilters {
@@ -8,11 +8,22 @@ export interface QueryFilters {
 	/** YYYY-MM-DD (inclusive, local time) */
 	until?: string;
 	top?: number;
+	/** substring match on session.directory (SQLite source only) */
+	project?: string;
 }
 
 interface Bound {
 	min: number;
 	max: number;
+}
+
+/** WHERE fragment restricting model_usage/tool_usage rows to sessions whose
+ * directory matches the --project substring. Empty string when unset.
+ * Appended after the time-bound placeholders; pushes one param. */
+function projectClause(project: string | undefined, params: unknown[]): string {
+	if (!project) return '';
+	params.push(`%${project}%`);
+	return ' AND session_id IN (SELECT id FROM session WHERE directory LIKE ?)';
 }
 
 function epochBound(filters: QueryFilters): Bound {
@@ -59,6 +70,8 @@ function fetchGroups(
 	groupAlias: string
 ): RawGroup[] {
 	const bound = epochBound(filters);
+	const params: unknown[] = [bound.min, bound.max];
+	const projectSql = projectClause(filters.project, params);
 	const rows = db.query(
 		`SELECT ${groupExpr} AS ${groupAlias},
 				provider_id, model_id,
@@ -73,10 +86,10 @@ function fetchGroups(
 				SUM(retry_count) AS retries,
 				SUM(duration_ms) AS duration_sum
 		FROM model_usage
-		WHERE started_at >= ? AND started_at <= ?
+		WHERE started_at >= ? AND started_at <= ?${projectSql}
 		GROUP BY ${groupAlias}, provider_id, model_id
 		ORDER BY requests DESC`,
-		[bound.min, bound.max]
+		params
 	);
 	return rows.map((r) => recordToGroup(r as Record<string, unknown>, groupAlias));
 }
@@ -252,6 +265,11 @@ export function sessionRows(
 	table: PricingTable
 ): SessionRow[] {
 	const bound = epochBound(filters);
+	const params: unknown[] = [bound.min, bound.max];
+	const projectSql = projectClause(filters.project, params);
+	const projectSqlMu = filters.project
+		? projectSql.replace('session_id IN', 'mu.session_id IN')
+		: '';
 	const rows = db.query(
 		`SELECT mu.session_id AS session_id,
 				COALESCE(s.title, s.slug, s.id) AS title,
@@ -268,10 +286,10 @@ export function sessionRows(
 				SUM(mu.duration_ms) AS duration_sum
 		FROM model_usage mu
 		LEFT JOIN session s ON s.id = mu.session_id
-		WHERE mu.started_at >= ? AND mu.started_at <= ?
+		WHERE mu.started_at >= ? AND mu.started_at <= ?${projectSqlMu}
 		GROUP BY mu.session_id
 		ORDER BY last_active DESC`,
-		[bound.min, bound.max]
+		params
 	);
 	// One pass for per-(session, model) token sums → per-session cost.
 	const modelGroups = db.query(
@@ -280,9 +298,9 @@ export function sessionRows(
 				SUM(cache_read_input_tokens) AS cache_read,
 				SUM(cache_creation_input_tokens) AS cache_write
 		FROM model_usage
-		WHERE started_at >= ? AND started_at <= ?
+		WHERE started_at >= ? AND started_at <= ?${projectSql}
 		GROUP BY session_id, model_id`,
-		[bound.min, bound.max]
+		params
 	);
 	const costBySession = new Map<string, { cost: number | null; partial: boolean }>();
 	for (const g of modelGroups as Record<string, unknown>[]) {
@@ -341,6 +359,8 @@ export function sessionRows(
 /** Per-tool call statistics (from tool_usage telemetry). */
 export function toolRows(db: UsageDatabase, filters: QueryFilters): ToolRow[] {
 	const bound = epochBound(filters);
+	const params: unknown[] = [bound.min, bound.max];
+	const projectSql = projectClause(filters.project, params);
 	const rows = db.query(
 		`SELECT tool_name,
 				COUNT(*) AS calls,
@@ -352,10 +372,10 @@ export function toolRows(db: UsageDatabase, filters: QueryFilters): ToolRow[] {
 				AVG(duration_ms) AS avg_duration,
 				AVG(output_bytes) AS avg_output
 		FROM tool_usage
-		WHERE started_at >= ? AND started_at <= ?
+		WHERE started_at >= ? AND started_at <= ?${projectSql}
 		GROUP BY tool_name
 		ORDER BY calls DESC`,
-		[bound.min, bound.max]
+		params
 	);
 	return (rows as Record<string, unknown>[]).map((r) => ({
 		tool: String(r['tool_name'] ?? 'unknown'),
@@ -375,6 +395,8 @@ export function toolRows(db: UsageDatabase, filters: QueryFilters): ToolRow[] {
 /** Whole-database summary. */
 export function totals(db: UsageDatabase, filters: QueryFilters, table: PricingTable): Totals {
 	const bound = epochBound(filters);
+	const muParams: unknown[] = [bound.min, bound.max];
+	const muProjectSql = projectClause(filters.project, muParams);
 	const mu = db.query(
 		`SELECT MIN(${DAY_EXPR}) AS first_day,
 				MAX(${DAY_EXPR}) AS last_day,
@@ -390,17 +412,19 @@ export function totals(db: UsageDatabase, filters: QueryFilters, table: PricingT
 				SUM(retry_count) AS retries,
 				AVG(time_to_first_token_ms) AS avg_ttft
 		FROM model_usage
-		WHERE started_at >= ? AND started_at <= ?`,
-		[bound.min, bound.max]
+		WHERE started_at >= ? AND started_at <= ?${muProjectSql}`,
+		muParams
 	)[0] as Record<string, unknown>;
+	const tuParams: unknown[] = [bound.min, bound.max];
+	const tuProjectSql = projectClause(filters.project, tuParams);
 	const tu = db.query(
 		`SELECT COUNT(*) AS calls,
 				SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS errors,
 				SUM(CASE WHEN destructive = 1 THEN 1 ELSE 0 END) AS destructive,
 				SUM(CASE WHEN side_effect_scope = 'network' THEN 1 ELSE 0 END) AS network
 		FROM tool_usage
-		WHERE started_at >= ? AND started_at <= ?`,
-		[bound.min, bound.max]
+		WHERE started_at >= ? AND started_at <= ?${tuProjectSql}`,
+		tuParams
 	)[0] as Record<string, unknown>;
 	const groups = fetchGroups(db, filters, `'model'`, '_grp');
 	let cost: number | null = 0;
@@ -448,6 +472,106 @@ export function totals(db: UsageDatabase, filters: QueryFilters, table: PricingT
 		destructiveToolCalls: n(tu['destructive']),
 		networkToolCalls: n(tu['network']),
 	};
+}
+
+/** Per-project (session directory) rollups, biggest spenders first. */
+export function projectRows(
+	db: UsageDatabase,
+	filters: QueryFilters,
+	table: PricingTable
+): ProjectRow[] {
+	const bound = epochBound(filters);
+	const params: unknown[] = [bound.min, bound.max];
+	const projectSql = projectClause(filters.project, params);
+	const rows = db.query(
+		`SELECT COALESCE(NULLIF(s.directory, ''), '(unknown)') AS project,
+				provider_id, model_id,
+				COUNT(*) AS requests,
+				SUM(mu.input_tokens) AS input,
+				SUM(mu.output_tokens) AS output,
+				SUM(mu.reasoning_tokens) AS reasoning,
+				SUM(mu.cache_read_input_tokens) AS cache_read,
+				SUM(mu.cache_creation_input_tokens) AS cache_write,
+				SUM(mu.duration_ms) AS duration_sum
+		FROM model_usage mu
+		LEFT JOIN session s ON s.id = mu.session_id
+		WHERE mu.started_at >= ? AND mu.started_at <= ?${projectSql.replace('session_id IN', 'mu.session_id IN')}
+		GROUP BY project, provider_id, model_id
+		ORDER BY requests DESC`,
+		params
+	);
+	const byProject = new Map<string, ProjectRow>();
+	for (const r of rows as Record<string, unknown>[]) {
+		const group: RawGroup = {
+			group: String(r['project']),
+			provider: r['provider_id'] === null ? null : String(r['provider_id']),
+			model: r['model_id'] === null ? null : String(r['model_id']),
+			requests: n(r['requests']),
+			input: n(r['input']),
+			output: n(r['output']),
+			reasoning: n(r['reasoning']),
+			cacheRead: n(r['cache_read']),
+			cacheWrite: n(r['cache_write']),
+			errors: 0,
+			cancelled: 0,
+			retries: 0,
+			durationSum: typeof r['duration_sum'] === 'number' ? (r['duration_sum'] as number) : null,
+		};
+		const usage = groupToUsageRow(group, table);
+		let row = byProject.get(group.group);
+		if (!row) {
+			row = {
+				key: group.group,
+				project: group.group,
+				requests: 0,
+				inputTokens: 0,
+				outputTokens: 0,
+				reasoningTokens: 0,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				totalTokens: 0,
+				costUsd: null,
+				costPartial: false,
+				sessions: 0,
+				lastActive: null,
+			};
+			byProject.set(group.group, row);
+		}
+		row.requests += usage.requests;
+		row.inputTokens += usage.inputTokens;
+		row.outputTokens += usage.outputTokens;
+		row.reasoningTokens += usage.reasoningTokens;
+		row.cacheReadTokens += usage.cacheReadTokens;
+		row.cacheWriteTokens += usage.cacheWriteTokens;
+		row.totalTokens += usage.totalTokens;
+		row.costPartial = row.costPartial || usage.costPartial === true;
+		if (usage.costUsd !== null) {
+			row.costUsd = (row.costUsd ?? 0) + usage.costUsd;
+		}
+	}
+	// sessions + last activity per project
+	const aggParams: unknown[] = [bound.min, bound.max];
+	const aggSql = projectClause(filters.project, aggParams);
+	const aggs = db.query(
+		`SELECT COALESCE(NULLIF(s.directory, ''), '(unknown)') AS project,
+				COUNT(DISTINCT mu.session_id) AS sessions,
+				MAX(mu.completed_at) AS last_active
+		FROM model_usage mu
+		LEFT JOIN session s ON s.id = mu.session_id
+		WHERE mu.started_at >= ? AND mu.started_at <= ?${aggSql.replace('session_id IN', 'mu.session_id IN')}
+		GROUP BY project`,
+		aggParams
+	);
+	for (const a of aggs as Record<string, unknown>[]) {
+		const row = byProject.get(String(a['project']));
+		if (row) {
+			row.sessions = n(a['sessions']);
+			row.lastActive = typeof a['last_active'] === 'number' ? a['last_active'] : null;
+		}
+	}
+	const out = [...byProject.values()];
+	out.sort((a, b) => b.totalTokens - a.totalTokens || b.requests - a.requests);
+	return filters.top ? out.slice(0, filters.top) : out;
 }
 
 function median(values: number[]): number | null {

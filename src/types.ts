@@ -46,6 +46,12 @@ export interface ToolRow {
 	avgOutputBytes: number | null;
 }
 
+export interface ProjectRow extends UsageRow {
+	project: string;
+	sessions: number;
+	lastActive: number | null;
+}
+
 export interface Totals {
 	firstDay: string | null;
 	lastDay: string | null;

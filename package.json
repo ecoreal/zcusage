@@ -1,6 +1,6 @@
 {
   "name": "zcusage",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Usage, cost & performance analytics for ZCode agents — reads your local session SQLite, zero dependencies, nothing leaves your machine.",
   "type": "module",
   "engines": {

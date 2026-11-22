@@ -55,13 +55,21 @@ zcusage daily
 |---|---|
 | `daily` *(default)* | Per-day requests, token split (input/output/cache read/write), cost |
 | `session` | Per-session tokens & cost, with title and project, newest first (`--top n`) |
+| `project` | Per-project (working directory) rollups — biggest spenders first |
 | `model` | Per-model: requests, tokens, cost, p50 TTFT, avg duration, errors/cancels |
 | `agents` | Main agent vs subagent usage split |
 | `tools` | Per-tool calls, errors, destructive / network counts, avg duration & output |
 | `status` | Whole-history summary |
 | `pricing` | Show pricing source; `--update` fetches LiteLLM's table |
 
-Useful flags: `--db <path>` (custom database), `--since/--until YYYY-MM-DD`, `--json`, `--no-cost`, `--pricing <file>`, `--top n`. The database path defaults to `~/.zcode/cli/db/db.sqlite` (override with `ZCODE_DB`).
+Useful flags: `--db <path>` (custom database), `--rollout-dir <dir>`, `--project <str>` (filter any command to sessions under a matching directory), `--since/--until YYYY-MM-DD`, `--json`, `--no-cost`, `--pricing <file>`, `--top n`.
+
+## Data sources
+
+zcusage automatically picks the first available:
+
+1. **SQLite store** `~/.zcode/cli/db/db.sqlite` (override with `--db` or `ZCODE_DB`) — full fidelity: session titles, project directories, TTFT, tool telemetry.
+2. **JSONL rollouts** `~/.zcode/cli/rollout/model-io-sess_*.jsonl` (override with `--rollout-dir` or `ZCODE_ROLLOUT_DIR`) — fallback for machines without the SQLite store. Parsed into an in-memory database, same commands work; session titles/project paths and TTFT are unavailable in this source.
 
 ## Pricing
 
@@ -84,7 +92,7 @@ zcusage reads only the `model_usage` / `tool_usage` / `session` telemetry tables
 ## Development
 
 ```bash
-npm test          # vitest (40 tests, synthetic SQLite fixtures — no real data touched)
+npm test          # vitest (51 tests, synthetic fixtures — no real data touched)
 npm run build     # typecheck + esbuild bundle → dist/cli.js
 npm run dev       # watch mode
 ```
@@ -93,9 +101,8 @@ Works on Linux / macOS / Windows wherever Node ≥ 24 and a ZCode data directory
 
 ## Roadmap
 
+- [x] v0.2 — JSONL rollout fallback, `project` command, `--project` filter
 - [ ] npm publish (`npx zcusage` without cloning)
-- [ ] JSONL rollout fallback (`~/.zcode/cli/rollout/*.jsonl`) for machines without the SQLite store
-- [ ] `--project <dir>` filter and per-project rollups
 - [ ] HTML/TUI dashboard
 - [ ] `zcode` provider plugin / marketplace distribution
 

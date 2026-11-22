@@ -1,4 +1,5 @@
-import { openDatabase, DEFAULT_DB_PATH } from './db.js';
+import { existsSync } from 'node:fs';
+import { openSource, DEFAULT_DB_PATH } from './db.js';
 import { loadPricing, updatePricingCache, pricingCachePath } from './pricing.js';
 import {
 	dailyRows,
@@ -7,12 +8,13 @@ import {
 	sessionRows,
 	toolRows,
 	totals,
+	projectRows,
 	type QueryFilters,
 } from './queries.js';
 import { renderTable, fmtInt, fmtTokens, fmtCost, fmtDuration, fmtTimestamp, truncate } from './format.js';
-import type { UsageRow, ToolRow, Totals } from './types.js';
+import type { UsageRow, ToolRow, Totals, ProjectRow } from './types.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 const USAGE = `zcusage — usage, cost & performance analytics for ZCode agents
 
@@ -21,6 +23,7 @@ Usage: zcusage [command] [options]
 Commands:
   daily            Daily token & cost totals (default)
   session          Per-session breakdown, newest first
+  project          Per-project (working directory) rollups
   model            Per-model breakdown with latency & reliability
   agents           Main agent vs subagent usage
   tools            Tool call statistics (incl. destructive / network calls)
@@ -28,15 +31,18 @@ Commands:
   pricing          Show pricing source; --update fetches LiteLLM's table
 
 Options:
-  --db <path>      Path to ZCode's SQLite DB (default: ~/.zcode/cli/db/db.sqlite)
-  --since <date>   Start date, YYYY-MM-DD (local time, inclusive)
-  --until <date>   End date, YYYY-MM-DD (inclusive)
-  --top <n>        Show only the first n rows (session/model)
-  --json           Machine-readable JSON output
-  --no-cost        Skip cost estimation
-  --pricing <file> Extra pricing table (LiteLLM JSON or {model:{input,output}})
-  -h, --help       Show this help
-  -V, --version    Show version
+  --db <path>        Path to ZCode's SQLite DB (default: ~/.zcode/cli/db/db.sqlite)
+  --rollout-dir <d>  JSONL rollout fallback dir (default: ~/.zcode/cli/rollout),
+                     used automatically when the SQLite store is absent
+  --project <str>    Only sessions whose directory contains this substring
+  --since <date>     Start date, YYYY-MM-DD (local time, inclusive)
+  --until <date>     End date, YYYY-MM-DD (inclusive)
+  --top <n>          Show only the first n rows (session/model)
+  --json             Machine-readable JSON output
+  --no-cost          Skip cost estimation
+  --pricing <file>   Extra pricing table (LiteLLM JSON or {model:{input,output}})
+  -h, --help         Show this help
+  -V, --version      Show version
 
 Data is read-only, local-only telemetry: token counts, latencies, tool call
 metadata. Message content is never read.
@@ -47,7 +53,9 @@ export class UsageError extends Error {}
 
 interface CliOptions {
 	command: string;
-	db: string;
+	db?: string;
+	rolloutDir?: string;
+	project?: string;
 	since?: string;
 	until?: string;
 	top?: number;
@@ -62,7 +70,8 @@ interface CliOptions {
 export function parseArgs(argv: string[]): CliOptions {
 	const opts: CliOptions = {
 		command: 'daily',
-		db: process.env['ZCODE_DB'] ?? DEFAULT_DB_PATH,
+		db: process.env['ZCODE_DB'],
+		rolloutDir: process.env['ZCODE_ROLLOUT_DIR'],
 		json: false,
 		noCost: false,
 		updatePricing: false,
@@ -75,15 +84,23 @@ export function parseArgs(argv: string[]): CliOptions {
 		switch (a) {
 			case 'daily':
 			case 'session':
+			case 'project':
+			case 'projects':
 			case 'model':
 			case 'agents':
 			case 'tools':
 			case 'status':
 			case 'pricing':
-				opts.command = a;
+				opts.command = a === 'projects' ? 'project' : a;
 				break;
 			case '--db':
 				opts.db = takeValue(args, a);
+				break;
+			case '--rollout-dir':
+				opts.rolloutDir = takeValue(args, a);
+				break;
+			case '--project':
+				opts.project = takeValue(args, a);
 				break;
 			case '--since':
 				opts.since = takeValue(args, a);
@@ -133,7 +150,7 @@ function takeValue(args: string[], flag: string): string {
 }
 
 function filtersOf(opts: CliOptions): QueryFilters {
-	return { since: opts.since, until: opts.until, top: opts.top };
+	return { since: opts.since, until: opts.until, top: opts.top, project: opts.project };
 }
 
 export async function run(argv: string[]): Promise<string> {
@@ -156,13 +173,20 @@ export async function run(argv: string[]): Promise<string> {
 
 	const { table, source } = loadPricing(opts.pricing);
 	const effective = opts.noCost ? {} : table; // empty table → all costs unknown
-	const db = openDatabase(opts.db);
+	if (opts.project && !opts.db && !existsSync(DEFAULT_DB_PATH)) {
+		// project filtering relies on session.directory, only present in SQLite
+		throw new UsageError(
+			'--project needs the SQLite source (jsonl rollouts carry no project info)'
+		);
+	}
+	const opened = openSource({ db: opts.db, rolloutDir: opts.rolloutDir });
+	const db = opened.usage;
 	try {
 		const filters = filtersOf(opts);
 		switch (opts.command) {
 			case 'daily': {
 				const rows = dailyRows(db, filters, effective);
-				return finalize(opts, rows, () => renderDaily(rows), source);
+				return finalize(opts, rows, () => renderDaily(rows), source, opened.note);
 			}
 			case 'session': {
 				const rows = sessionRows(db, filters, effective);
@@ -184,7 +208,32 @@ export async function run(argv: string[]): Promise<string> {
 								},
 							])
 						),
-					source
+					source,
+					opened.note
+				);
+			}
+			case 'project': {
+				const rows = projectRows(db, filters, effective);
+				return finalize(
+					opts,
+					rows,
+					() =>
+						renderTable(
+							['project', 'sessions', 'last active', 'reqs', 'total', 'cost'],
+							rows.map((r: ProjectRow) => [
+								{ text: truncate(r.project, 44) },
+								{ text: fmtInt(r.sessions), align: 'right' },
+								{ text: fmtTimestamp(r.lastActive) },
+								{ text: fmtInt(r.requests), align: 'right' },
+								{ text: fmtTokens(r.totalTokens), align: 'right' },
+								{
+									text: r.costUsd === null ? '-' : fmtCost(r.costUsd) + (r.costPartial ? '*' : ''),
+									align: 'right',
+								},
+							])
+						),
+					source,
+					opened.note
 				);
 			}
 			case 'model': {
@@ -271,12 +320,14 @@ export async function run(argv: string[]): Promise<string> {
 /** JSON passthrough in --json mode; rendered table + pricing footer otherwise. */
 function finalize(
 	opts: CliOptions,
-	payload: Array<UsageRow | ToolRow | Totals> | UsageRow[],
+	payload: Array<UsageRow | ToolRow | Totals | ProjectRow> | UsageRow[],
 	render: () => string,
-	source: string
+	source: string,
+	dataNote?: string
 ): string {
 	if (opts.json) return JSON.stringify(payload, null, 2);
 	let out = render();
+	if (dataNote) out += `\n\n${dataNote}`;
 	if (opts.noCost) {
 		out += '\n\ncost estimation skipped (--no-cost).';
 	} else {

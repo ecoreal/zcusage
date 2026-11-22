@@ -4,8 +4,56 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { homedir } from 'node:os';
 import type { UsageDatabase } from './types.js';
+import { openJsonlSource } from './jsonl.js';
 
 export const DEFAULT_DB_PATH = join(homedir(), '.zcode', 'cli', 'db', 'db.sqlite');
+export const DEFAULT_ROLLOUT_DIR = join(homedir(), '.zcode', 'cli', 'rollout');
+
+export interface OpenedSource {
+	usage: UsageDatabase;
+	source: 'sqlite' | 'jsonl';
+	/** human note when the fallback degraded some capabilities */
+	note?: string;
+}
+
+/**
+ * Open the best available ZCode data source. Priority:
+ * 1. explicit `db` → SQLite only (errors clearly if missing)
+ * 2. explicit `rolloutDir` → JSONL import only
+ * 3. auto: default SQLite when present, else default rollout dir,
+ *    else a guidance error.
+ */
+export function openSource(opts: { db?: string; rolloutDir?: string }): OpenedSource {
+	if (opts.db) {
+		return { usage: openDatabase(opts.db), source: 'sqlite' };
+	}
+	if (opts.rolloutDir) {
+		return openJsonl(opts.rolloutDir);
+	}
+	const dbPath = DEFAULT_DB_PATH;
+	if (existsSync(resolvePath(dbPath))) {
+		return { usage: openDatabase(dbPath), source: 'sqlite' };
+	}
+	return openJsonl(DEFAULT_ROLLOUT_DIR);
+}
+
+function openJsonl(rolloutDir: string): OpenedSource {
+	const resolved = resolvePath(rolloutDir);
+	if (!existsSync(resolved)) {
+		throw new Error(
+			`No ZCode data source found.\n` +
+				`- SQLite store: ${resolvePath(DEFAULT_DB_PATH)} (missing)\n` +
+				`- JSONL rollouts: ${resolved} (missing)\n` +
+				`Pass --db <path> or --rollout-dir <dir> if yours live elsewhere.`
+		);
+	}
+	const { db, files, records } = openJsonlSource(resolved);
+	return {
+		usage: db,
+		source: 'jsonl',
+		note: `jsonl fallback: ${files} file(s), ${records} record(s) from ${resolved} — session titles/projects and TTFT unavailable in this source`,
+	};
+}
 
 /** Tables zcusage reads. All are pure telemetry — no message content. */
 const REQUIRED_TABLES = ['model_usage', 'session', 'tool_usage'] as const;
